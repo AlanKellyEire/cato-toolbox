@@ -350,8 +350,8 @@ while True:
     for event in resp["data"]["eventsFeed"]["accounts"][0]["records"]:
 	# adding data source field as it is missing from some logs.
 	event["fieldsMap"]["datasource"] = "cato_network_api"
-	# adding timestamp to log.
-        event["fieldsMap"]["event_timestamp"] = event["time"]
+	# removing as time is already in epoch.
+        # event["fieldsMap"]["event_timestamp"] = event["time"]
         event_reorder = dict(sorted(event["fieldsMap"].items(),key=lambda i: i[0] == 'event_timestamp', reverse= True))
 
         # filtering
