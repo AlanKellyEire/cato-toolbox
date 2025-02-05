@@ -96,6 +96,19 @@ def logd(text):
     if args.veryverbose:
         log(text)
 
+# send logs over TCP
+def send_tcp(ip, port, message):
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    print(ip, port)
+    s.connect((ip, port))
+    s.sendall(bytes(str(message), "utf-8"))
+    s.close()
+
+#Sending logs over UDP
+def send_udp(ip, port, message):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.sendto(bytes(str(message), "utf-8"), (ip, port))
+    s.close()
 
 # send GQL query string to API, return JSON
 # if we hit a network error, retry ten times with a 2 second sleep
@@ -336,6 +349,9 @@ while True:
     # Construct list of events, with added timestamp, reordering (for Splunk) and optional filtering
     events_list = []
     for event in resp["data"]["eventsFeed"]["accounts"][0]["records"]:
+	# adding data source field as it is missing from some logs.
+	event["fieldsMap"]["datasource"] = "cato_network_api"
+	# adding timestamp to log.
         event["fieldsMap"]["event_timestamp"] = event["time"]
         event_reorder = dict(sorted(event["fieldsMap"].items(),key=lambda i: i[0] == 'event_timestamp', reverse= True))
 
@@ -343,7 +359,6 @@ while True:
         # if something_we_don't_want:
         #   continue
         
-
         events_list.append(event_reorder)
 
 
@@ -359,13 +374,20 @@ while True:
                     print(json.dumps(event))
 
 
-    # network stream
-    if args.stream_events is not None:
+    # # network stream
+    # if args.stream_events is not None:
+    #     logd(f"Sending events to {network_elements[0]}:{network_elements[1]}")
+    #     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+    #         s.connect((network_elements[0], int(network_elements[1])))
+    #         for event in events_list:
+    #             s.sendall(json.dumps(event, ensure_ascii=False).encode("utf-8"))
+    
+    # send each log separately
+    if options.stream_events is not None:
         logd(f"Sending events to {network_elements[0]}:{network_elements[1]}")
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.connect((network_elements[0], int(network_elements[1])))
-            for event in events_list:
-                s.sendall(json.dumps(event, ensure_ascii=False).encode("utf-8"))
+        for event in events_list:
+            send_udp(network_elements[0], int(network_elements[1]), event)
+            # s.sendall(json.dumps(event, ensure_ascii=False).encode("utf-8"))
 
 
     # send to Microsoft Sentinel
