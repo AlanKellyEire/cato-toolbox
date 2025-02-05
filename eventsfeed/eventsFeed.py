@@ -99,7 +99,6 @@ def logd(text):
 # send logs over TCP
 def send_tcp(ip, port, message):
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    print(ip, port)
     s.connect((ip, port))
     s.sendall(bytes(str(message), "utf-8"))
     s.close()
