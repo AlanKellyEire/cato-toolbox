@@ -1,4 +1,27 @@
 # eventsFeed.py
+# NOTE this is modified version of an offical Cato script.
+# Cato script sends multiple logs at once which we can not parse and also is missing data source field so plugin/app needs to be manually assigned.
+#
+# Version: 1.0.5
+# Author: Peter Lee, March 2024
+#
+# Changes since 1.0.4:
+# * datetime.utcnow() -> datetime.now(datetime.UTC)
+#
+# Changes since 1.0.3:
+# * Moved event_timestamp to front of record, to make it easier for Splunk to index events
+# * Added support for gzip compression to improve performance and reduce bandwidth
+#
+# Changes since 1.0.2:
+# * Added filtering boilerplate
+#
+# Changes since 1.0.1:
+# * Fix stdout decoding error on Windows by catching exception and retrying with ensure_ascii=True
+# * When printing, reorder the event fields so event_timestamp is first to fix a problem with Splunk Cloud
+#   indexing. Reported and fix by customer 3640.
+#
+# Changes since 1.0:
+# * ensure_ascii=False when sending network stream
 #
 # This script takes as input an API key and account ID, and returns events in JSON format
 # from the event queue associated with that account ID. Requires events feed to be enabled
@@ -10,7 +33,7 @@
 # The eventsFeed API query supports multiple output formats - the script uses the fieldsMap format
 # which displays nicely as a JSON key:value collection.
 #
-# The script provides the -n option for sending events to a TCP socket, and the -z option
+# The script provides the -n option for sending events as a stream to a TCP socket, and the -z option
 # for sending events directly into Microsoft Sentinel.
 #
 # Usage: eventsFeed.py [options]
@@ -64,8 +87,8 @@
 # is restricted to the bare minimum required for the script to work with the API, and may not be
 # sufficient for production environments.
 #
+# All questions or feedback should be sent to api@catonetworks.com
 
-import argparse
 import base64
 import datetime
 import gzip
@@ -79,6 +102,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+from optparse import OptionParser
 
 
 ########################################################################################
@@ -88,20 +112,24 @@ import urllib.request
 
 # log debug output
 def log(text):
-    if args.verbose or args.veryverbose:
-        print(f"LOG {datetime.datetime.now(datetime.UTC)}> {text}")
+    if options.verbose or options.veryverbose:
+        print(f"LOG {datetime.datetime.utcnow()}> {text}")
+
 
 # log detailed debug output
 def logd(text):
-    if args.veryverbose:
+    if options.veryverbose:
         log(text)
 
-# send logs over TCP
+
+# send via TCP
 def send_tcp(ip, port, message):
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    print(ip, port)
     s.connect((ip, port))
     s.sendall(bytes(str(message), "utf-8"))
     s.close()
+
 
 #Sending logs over UDP
 def send_udp(ip, port, message):
@@ -116,13 +144,8 @@ def send(query):
     global total_bytes_compressed
     global total_bytes_uncompressed
     retry_count = 0
-    data = {'query':query}
-    headers = {
-        'x-api-key': args.api_key,
-        'Content-Type':'application/json',
-        'Accept-Encoding':'gzip, deflate, br',
-        'User-Agent': 'eventsFeed.py'
-    }
+    data = {'query': query}
+    headers = {'x-api-key': options.api_key, 'Content-Type': 'application/json', 'Accept-Encoding': 'gzip, deflate, br'}
     no_verify = ssl._create_unverified_context()
     while True:
         if retry_count > 10:
@@ -130,7 +153,7 @@ def send(query):
             sys.exit(1)
         try:
             request = urllib.request.Request(url='https://api.catonetworks.com/api/v1/graphql2',
-                data=json.dumps(data).encode("ascii"),headers=headers)
+                                             data=json.dumps(data).encode("ascii"), headers=headers)
             response = urllib.request.urlopen(request, context=no_verify, timeout=30)
             api_call_count += 1
         except Exception as e:
@@ -147,11 +170,11 @@ def send(query):
             time.sleep(5)
             continue
         break
-    result = json.loads(result_data.decode('utf-8','replace'))
+    result = json.loads(result_data.decode('utf-8', 'replace'))
     if "errors" in result:
         log(f"API error: {result_data}")
-        return False,result
-    return True,result
+        return False, result
+    return True, result
 
 
 ########################################################################################
@@ -170,12 +193,12 @@ def build_signature(customer_id, shared_key, date, content_length):
     bytes_to_hash = bytes(string_to_hash, encoding="utf-8")
     decoded_key = base64.b64decode(shared_key)
     encoded_hash = base64.b64encode(hmac.new(decoded_key, bytes_to_hash, digestmod=hashlib.sha256).digest()).decode()
-    authorization = "SharedKey {}:{}".format(customer_id,encoded_hash)
+    authorization = "SharedKey {}:{}".format(customer_id, encoded_hash)
     return authorization
+
 
 # Build and send a request to the POST API
 def post_data(customer_id, shared_key, body):
-
     rfc1123date = datetime.datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')
     content_length = len(body)
     signature = build_signature(customer_id, shared_key, rfc1123date, content_length)
@@ -188,8 +211,9 @@ def post_data(customer_id, shared_key, body):
     }
     no_verify = ssl._create_unverified_context()
     try:
-        request = urllib.request.Request(url='https://' + customer_id + '.ods.opinsights.azure.com/api/logs?api-version=2016-04-01',
-            data=body,headers=headers)
+        request = urllib.request.Request(
+            url='https://' + customer_id + '.ods.opinsights.azure.com/api/logs?api-version=2016-04-01',
+            data=body, headers=headers)
         response = urllib.request.urlopen(request, context=no_verify)
     except urllib.error.URLError as e:
         print(f"Azure API ERROR:{e}")
@@ -211,41 +235,42 @@ total_bytes_uncompressed = 0
 start = datetime.datetime.now()
 
 # Process options
-parser = argparse.ArgumentParser()
-parser.add_argument("-K", dest="api_key", help="API key")
-parser.add_argument("-I", dest="ID", help="Account ID")
-parser.add_argument("-P", dest="prettify", action="store_true", help="Prettify output")
-parser.add_argument("-p", dest="print_events", action="store_true", help="Print event records")
-parser.add_argument("-n", dest="stream_events", help="Send events over network to host:port TCP")
-parser.add_argument("-z", dest="sentinel", help="Send events to Sentinel customerid:sharedkey")
-parser.add_argument("-m", dest="marker", help="Initial marker value (default is \"\", which means start of the queue)")
-parser.add_argument("-c", dest="config_file", help="Config file location (default ./config.txt)")
-parser.add_argument("-t", dest="event_types", help="Comma-separated list of event types to filter on")
-parser.add_argument("-s", dest="event_sub_types", help="Comma-separated list of event sub types to filter on")
-parser.add_argument("-f", dest="fetch_limit", help="Stop execution if a fetch returns less than this number of events (default=1)")
-parser.add_argument("-r", dest="runtime_limit", help="Stop execution if total runtime exceeds this many seconds (default=infinite)")
-parser.add_argument("-v", dest="verbose", action="store_true", help="Print debug info")
-parser.add_argument("-V", dest="veryverbose", action="store_true", help="Print detailed debug info")
-args = parser.parse_args()
-if args.api_key is None or args.ID is None:
+parser = OptionParser()
+parser.add_option("-K", dest="api_key", help="API key")
+parser.add_option("-I", dest="ID", help="Account ID")
+parser.add_option("-P", dest="prettify", action="store_true", help="Prettify output")
+parser.add_option("-p", dest="print_events", action="store_true", help="Print event records")
+parser.add_option("-n", dest="stream_events", help="Send events over network to host:port TCP")
+parser.add_option("-z", dest="sentinel", help="Send events to Sentinel customerid:sharedkey")
+parser.add_option("-m", dest="marker", help="Initial marker value (default is \"\", which means start of the queue)")
+parser.add_option("-c", dest="config_file", help="Config file location (default ./config.txt)")
+parser.add_option("-t", dest="event_types", help="Comma-separated list of event types to filter on")
+parser.add_option("-s", dest="event_sub_types", help="Comma-separated list of event sub types to filter on")
+parser.add_option("-f", dest="fetch_limit",
+                  help="Stop execution if a fetch returns less than this number of events (default=1)")
+parser.add_option("-r", dest="runtime_limit",
+                  help="Stop execution if total runtime exceeds this many seconds (default=infinite)")
+parser.add_option("-v", dest="verbose", action="store_true", help="Print debug info")
+parser.add_option("-V", dest="veryverbose", action="store_true", help="Print detailed debug info")
+(options, args) = parser.parse_args()
+if options.api_key is None or options.ID is None:
     parser.print_help()
     sys.exit(1)
-
 
 # either use the default marker or load from config file
 config_file = "./config.txt"
 marker = ""
-if args.config_file is None:
+if options.config_file is None:
     log(f"No config file specified, using default: {config_file}")
 else:
-    config_file = args.config_file
+    config_file = options.config_file
     log(f"Using config file from -c parameter: {config_file}")
-if args.marker is None:
+if options.marker is None:
     log("No marker value supplied, setting marker = \"\"")
-	# does the config file exist, if so load the marker value
+    # does the config file exist, if so load the marker value
     if os.path.isfile(config_file):
         log(f"Found config file: {config_file}")
-        with open(config_file,"r") as File:
+        with open(config_file, "r") as File:
             try:
                 marker = File.readlines()[0].strip()
             except IndexError as E:
@@ -255,57 +280,57 @@ if args.marker is None:
     else:
         log("Config file does not exist, sticking with default marker")
 else:
-    marker = args.marker
+    marker = options.marker
     log(f"Using marker value from -m parameter: {marker}")
 
 # process event_type filters
-if args.event_types is not None:
-    log(f"Event type filter parameter: {args.event_types}")
-    event_type_strings = args.event_types.split(',')
-    log("Event type strings:" + str(event_type_strings).replace('\'','"'))
-    event_filter_string = "{fieldName:event_type,operator:in,values:"+str(event_type_strings).replace('\'','"')+"}"
+if options.event_types is not None:
+    log(f"Event type filter parameter: {options.event_types}")
+    event_type_strings = options.event_types.split(',')
+    log("Event type strings:" + str(event_type_strings).replace('\'', '"'))
+    event_filter_string = "{fieldName:event_type,operator:in,values:" + str(event_type_strings).replace('\'', '"') + "}"
     log(f"Event filter string: {event_filter_string}")
 else:
     event_filter_string = ""
 
 # process event_sub_type filters
-if args.event_sub_types is not None:
-    log(f"Event sub type filter parameter: {args.event_sub_types}")
-    event_subtype_strings = args.event_sub_types.split(',')
-    log("Event sub type strings:" + str(event_subtype_strings).replace('\'','"'))
-    event_subfilter_string = "{fieldName:event_sub_type,operator:in,values:"+str(event_subtype_strings).replace('\'','"')+"}"
+if options.event_sub_types is not None:
+    log(f"Event sub type filter parameter: {options.event_sub_types}")
+    event_subtype_strings = options.event_sub_types.split(',')
+    log("Event sub type strings:" + str(event_subtype_strings).replace('\'', '"'))
+    event_subfilter_string = "{fieldName:event_sub_type,operator:in,values:" + str(event_subtype_strings).replace('\'',
+                                                                                                                  '"') + "}"
     log(f"Event sub filter string: {event_subfilter_string}")
 else:
     event_subfilter_string = ""
 
-
 # process network options
-if args.stream_events is not None:
-    network_elements = args.stream_events.split(":")
+if options.stream_events is not None:
+    network_elements = options.stream_events.split(":")
     if len(network_elements) != 2:
         print("Error: -n value must be in the form of host:port")
         parser.print_help()
         sys.exit(1)
 
 # process sentinel options
-if args.sentinel is not None:
-    sentinel_elements = args.sentinel.split(":")
+if options.sentinel is not None:
+    sentinel_elements = options.sentinel.split(":")
     if len(sentinel_elements) != 2:
         print("Error: -z value must be in the form of customerid:sharedkey")
         parser.print_help()
         sys.exit(1)
 
 # fetch count
-if args.fetch_limit is None:
+if options.fetch_limit is None:
     FETCH_THRESHOLD = 1
 else:
-    FETCH_THRESHOLD = int(args.fetch_limit)
+    FETCH_THRESHOLD = int(options.fetch_limit)
 
 # runtime threshold
-if args.runtime_limit is None:
+if options.runtime_limit is None:
     RUNTIME_LIMIT = sys.maxsize
 else:
-    RUNTIME_LIMIT = int(args.runtime_limit)
+    RUNTIME_LIMIT = int(options.runtime_limit)
 
 # API call loop
 iteration = 1
@@ -313,7 +338,7 @@ total_count = 0
 while True:
     query = '''
 {
-  eventsFeed(accountIDs:[''' + args.ID + ''']
+  eventsFeed(accountIDs:[''' + options.ID + ''']
     marker:"''' + marker + '''"
     filters:[''' + event_filter_string + "," + event_subfilter_string + '''])
   {
@@ -330,7 +355,7 @@ while True:
 }'''
 
     logd(query)
-    success,resp = send(query)
+    success, resp = send(query)
     if not success:
         print(resp)
         sys.exit(1)
@@ -340,68 +365,61 @@ while True:
     total_count += fetched_count
     line = f"iteration:{iteration} fetched:{fetched_count} total_count:{total_count} marker:{marker}"
     if len(resp["data"]["eventsFeed"]["accounts"][0]["records"]) > 0:
-        line += " "+resp["data"]["eventsFeed"]["accounts"][0]["records"][0]["time"]
-        line += " "+resp["data"]["eventsFeed"]["accounts"][0]["records"][-1]["time"]
+        line += " " + resp["data"]["eventsFeed"]["accounts"][0]["records"][0]["time"]
+        line += " " + resp["data"]["eventsFeed"]["accounts"][0]["records"][-1]["time"]
     log(line)
-
 
     # Construct list of events, with added timestamp, reordering (for Splunk) and optional filtering
     events_list = []
     for event in resp["data"]["eventsFeed"]["accounts"][0]["records"]:
-	# adding data source field as it is missing from some logs.
-	event["fieldsMap"]["datasource"] = "cato_network_api"
-	# removing as time is already in epoch.
-        # event["fieldsMap"]["event_timestamp"] = event["time"]
-        event_reorder = dict(sorted(event["fieldsMap"].items(),key=lambda i: i[0] == 'event_timestamp', reverse= True))
+        event["fieldsMap"]["event_timestamp"] = event["time"]
+        event_reorder = dict(sorted(event["fieldsMap"].items(), key=lambda i: i[0] == 'event_timestamp', reverse=True))
 
         # filtering
         # if something_we_don't_want:
         #   continue
-        
+
         events_list.append(event_reorder)
 
-
-	# print output
-    if args.print_events:
+    # print output
+    if options.print_events:
         for event in events_list:
-            if args.prettify:
-                print(json.dumps(event,indent=2, ensure_ascii=False))
+            if options.prettify:
+                print(json.dumps(event, indent=2, ensure_ascii=False))
             else:
                 try:
                     print(json.dumps(event, ensure_ascii=False))
-                except Exception as e:
+                except:
                     print(json.dumps(event))
 
-
     # # network stream
-    # if args.stream_events is not None:
+    # if options.stream_events is not None:
     #     logd(f"Sending events to {network_elements[0]}:{network_elements[1]}")
     #     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
     #         s.connect((network_elements[0], int(network_elements[1])))
     #         for event in events_list:
     #             s.sendall(json.dumps(event, ensure_ascii=False).encode("utf-8"))
-    
+
     # send each log separately
     if options.stream_events is not None:
         logd(f"Sending events to {network_elements[0]}:{network_elements[1]}")
         for event in events_list:
+            #send via UDP
             send_udp(network_elements[0], int(network_elements[1]), event)
             # s.sendall(json.dumps(event, ensure_ascii=False).encode("utf-8"))
 
-
     # send to Microsoft Sentinel
-    if args.sentinel is not None:
+    if options.sentinel is not None:
         logd(f"Sending events to Azure workspace ID {sentinel_elements[0]}")
-        response_status = post_data(sentinel_elements[0],sentinel_elements[1],json.dumps(events_list).encode('ascii'))
+        response_status = post_data(sentinel_elements[0], sentinel_elements[1], json.dumps(events_list).encode('ascii'))
         if response_status < 200 or response_status > 299:
             print(f"Send to Azure returned {response_status}, exiting")
             sys.exit(1)
         logd(f"Send to Azure response code:{response_status}")
 
-
     # write marker back out
     logd("Writing marker to " + config_file)
-    with open(config_file,"w") as File:
+    with open(config_file, "w") as File:
         File.write(marker)
 
     # increment counter and check if we hit any limits for stopping
@@ -415,4 +433,4 @@ while True:
         break
 
 end = datetime.datetime.now()
-log(f"OK {total_count} events from {api_call_count} API calls with {total_bytes_uncompressed} bytes uncompressed, {total_bytes_compressed} bytes compressed in {end-start}")
+log(f"OK {total_count} events from {api_call_count} API calls with {total_bytes_uncompressed} bytes uncompressed, {total_bytes_compressed} bytes compressed in {end - start}")
